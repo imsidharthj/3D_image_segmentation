@@ -5,10 +5,10 @@ import numpy as np
 from joblib import Parallel, delayed
 
 # Define constants
-IMAGE_INPUT_FOLDER = '/home/sidharth/Workspace/python/3D_Segmentation_model/data/raw/images'
-LABEL_INPUT_FOLDER = '/home/sidharth/Workspace/python/3D_Segmentation_model/data/raw/labels'
-IMAGE_OUTPUT_FOLDER = '/home/sidharth/Workspace/python/3D_Segmentation_model/data/processed/images'
-LABEL_OUTPUT_FOLDER = '/home/sidharth/Workspace/python/3D_Segmentation_model/data/processed/labels'
+IMAGE_INPUT_FOLDER = '/home/sidharth/Workspace/python/3D_image_segmentation/data/raw/images'
+LABEL_INPUT_FOLDER = '/home/sidharth/Workspace/python/3D_image_segmentation/data/raw/labels'
+IMAGE_OUTPUT_FOLDER = '/home/sidharth/Workspace/python/3D_image_segmentation/data/processed/images'
+LABEL_OUTPUT_FOLDER = '/home/sidharth/Workspace/python/3D_image_segmentation/data/processed/labels'
 
 # Define transformations
 transform = tio.Compose([
