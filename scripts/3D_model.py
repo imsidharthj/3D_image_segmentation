@@ -11,6 +11,7 @@ from tensorflow.keras.losses import BinaryCrossentropy
 from tensorflow.keras.metrics import BinaryAccuracy, MeanIoU
 import SimpleITK as sitk
 import nibabel as nib
+import matplotlib.pyplot as plt
 
 # Resampling function for NIfTI images
 def resample_nifti(input_dir, output_dir, output_size=(512, 512, 129)):
@@ -174,50 +175,60 @@ train_dataset = load_and_preprocess_data(image_output_dir, label_output_dir, bat
 train_vnet(train_dataset, num_epochs=10, learning_rate=1e-4)
 
 
+def test(model_path, test_image_path, input_shape, num_classes):
+    """
+    Test the trained V-Net model on a test image and visualize the result.
 
-# Load the trained model.
-# Preprocess the test images.
-# Run inference using the trained model.
-# Visualize the predicted segmentation.
-# Evaluate the results (if ground truth labels are available).
-# Apply the model to real-world CT scans.
-# (Optional) Post-process the segmentation mask for refinement.
+    Args:
+        model_path (str): Path to the trained model weights.
+        test_image_path (str): Path to the test NIfTI image.
+        input_shape (tuple): Shape of the input image (depth, height, width, channels).
+        num_classes (int): Number of segmentation classes.
 
+    Returns:
+        None
+    """
 
-# # Load trained model
-# def load_trained_vnet(model_path, input_shape, num_classes):
-#     model = build_vnet(input_shape, num_classes)
-#     model.load_weights(model_path)
-#     return model
+    # Initialize the model and load trained weights
+    model = build_vnet(input_shape, num_classes)
+    model.load_weights(model_path)
 
-# # Example of loading the final model
-# input_shape = (512, 512, 129, 1)  # Adjust based on your input data
-# num_classes = 2
-# model_path = 'saved_models/model_vnet_final.h5'  # Path to your saved model
-# model = load_trained_vnet(model_path, input_shape, num_classes)
+    # Load and preprocess the test image
+    image = nib.load(test_image_path).get_fdata()
+    image = (image - np.mean(image)) / np.std(image)  # Normalize image
+    image = np.expand_dims(image, axis=-1)  # Add channel dimension (for grayscale)
+    test_image = np.expand_dims(image, axis=0)  # Add batch dimension
 
+    # Make predictions
+    predicted_mask = model.predict(test_image)
+    
+    # Get binary predictions (for binary segmentation)
+    predicted_mask = (predicted_mask > 0.5).astype(np.float32)
 
-# Preprocess a test image (same as during training)
-# def preprocess_image(image_path):
-#     image = nib.load(image_path).get_fdata()
-#     image = (image - np.mean(image)) / np.std(image)
-#     image = np.expand_dims(image, axis=-1)  # Add channel dimension
-#     return np.array(image)
+    # Visualize the results
+    slice_num = test_image.shape[1] // 2  # Choose the middle slice to display
+    plt.figure(figsize=(12, 6))
 
-# # Example of loading a single test image
-# test_image_path = '/path/to/test/image.nii.gz'
-# test_image = preprocess_image(test_image_path)
-# test_image = np.expand_dims(test_image, axis=0)  # Add batch dimension
+    # Original image slice
+    plt.subplot(1, 2, 1)
+    plt.imshow(test_image[0, slice_num, :, :, 0], cmap='gray')
+    plt.title(f'Original Image - Slice {slice_num}')
+    plt.axis('off')
 
+    # Predicted segmentation mask slice
+    plt.subplot(1, 2, 2)
+    plt.imshow(predicted_mask[0, slice_num, :, :, 0], cmap='gray')
+    plt.title(f'Predicted Segmentation - Slice {slice_num}')
+    plt.axis('off')
 
-# # Predict segmentation on test image
-# def predict_segmentation(model, test_image):
-#     predicted_mask = model.predict(test_image)
-#     predicted_mask = np.argmax(predicted_mask, axis=-1)  # Convert from one-hot encoding
-#     return predicted_mask
+    plt.show()
 
-# # Example of running prediction
-# predicted_mask = predict_segmentation(model, test_image)
+input_shape = (512, 512, 129, 1)
+num_classes = 2  # Binary segmentation
+model_path = 'saved_models/model_vnet_final.h5'
+test_image_path = '/home/sidharth/Workspace/python/3D_image_segmentation/data/test/images/FLARE22_Tr_0047_0000.nii.gz'
+
+test(model_path, test_image_path, input_shape, num_classes)
 
 
 # import matplotlib.pyplot as plt

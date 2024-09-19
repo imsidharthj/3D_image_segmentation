@@ -26,7 +26,7 @@ def resample_nifti(input_dir, output_dir, output_size=(512, 512, 129)):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # Get list of NIfTI files in input directory
+    # Get list of NIfTI files in input directory with extensions .nii or .nii.gz 
     files = [f for f in os.listdir(input_dir) if f.endswith(('.nii', '.nii.gz'))]
 
     for file in files:
@@ -36,21 +36,21 @@ def resample_nifti(input_dir, output_dir, output_size=(512, 512, 129)):
 
         # Resample image
         resampler = sitk.ResampleImageFilter()
-        resampler.SetInterpolator(sitk.sitkLinear)
-        resampler.SetReferenceImage(image_sitk)
-        resampler.SetOutputSpacing([image_sitk.GetSpacing()[0] * image_sitk.GetSize()[0] / output_size[0],
-                                    image_sitk.GetSpacing()[1] * image_sitk.GetSize()[1] / output_size[1],
+        resampler.SetInterpolator(sitk.sitkLinear) # Sets the interpolation method to linear interpolation
+        resampler.SetReferenceImage(image_sitk) # Sets the reference image to the current image being processed
+        resampler.SetOutputSpacing([image_sitk.GetSpacing()[0] * image_sitk.GetSize()[0] / output_size[0], # Calculates the new spacing based on the desired output
+                                    image_sitk.GetSpacing()[1] * image_sitk.GetSize()[1] / output_size[1], #  size and the original image's spacing.
                                     image_sitk.GetSpacing()[2] * image_sitk.GetSize()[2] / output_size[2]])
-        resampler.SetSize(output_size)
-        resampler.SetOutputOrigin(image_sitk.GetOrigin())
+        resampler.SetSize(output_size) # Sets the output size based on the provided output_size argument.
+        resampler.SetOutputOrigin(image_sitk.GetOrigin()) # Copies the origin and direction information from the original image.
         resampler.SetOutputDirection(image_sitk.GetDirection())
-        image_resampled_sitk = resampler.Execute(image_sitk)
+        image_resampled_sitk = resampler.Execute(image_sitk) # Executes the resampling filter on the original image.
 
-        # Save resampled image
+        # Save the resampled image using SimpleITK's WriteImage function with the constructed output file path.
         output_file = os.path.join(output_dir, file)
         sitk.WriteImage(image_resampled_sitk, output_file)
 
-        print(f"Resampled {file} and saved to {output_file}")
+        print(f"Resampled {file} and saved to {output_file}") # Print a message indicating the file that was resampled and its saved location.
 
 
 image_input_dir = '/home/sidharth/Workspace/python/3D_image_segmentation/data/raw/images'
@@ -85,12 +85,12 @@ def visualize_random_image_and_label(image_dir, label_dir):
     # Visualize the middle slice of the 3D image and label along the z-axis
     middle_slice_idx = image_data.shape[2] // 2
 
-    # Display the image slice
+    # Create a new figure with a specified figure size
     plt.figure(figsize=(12, 6))
     
-    plt.subplot(1, 2, 1)
+    plt.subplot(1, 2, 1) # Set the subplot position to the first position in a 1x2 grid.
     plt.title(f"Random Image - {random_image_file}")
-    plt.imshow(image_data[:, :, middle_slice_idx], cmap='gray')
+    plt.imshow(image_data[:, :, middle_slice_idx], cmap='gray') # Display the middle slice of the image using plt.imshow with the 'gray'colormap.
     
     # Display the label slice
     plt.subplot(1, 2, 2)
@@ -105,7 +105,7 @@ visualize_random_image_and_label(image_output_dir, label_output_dir)
 class VNet(nn.Module):
     def __init__(self):
         super(VNet, self).__init__()
-
+        # The encoder consists of convolutional layers, batch normalization, and ReLU activations, followed by a max pooling layer.
         self.encoder = nn.Sequential(
             nn.Conv3d(1, 16, kernel_size=5, padding=2),
             nn.BatchNorm3d(16),
@@ -115,7 +115,7 @@ class VNet(nn.Module):
             nn.ReLU(),
             nn.MaxPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2))
         )
-
+        # The decoder consists of convolutional transpose layers, batch normalization, and ReLU activations.
         self.decoder = nn.Sequential(
             nn.ConvTranspose3d(32, 16, kernel_size=(4, 4, 4), stride=(2, 2, 2)),
             nn.BatchNorm3d(16),
@@ -125,13 +125,13 @@ class VNet(nn.Module):
             nn.ReLU()
         )
 
-        self.final = nn.Conv3d(16, 1, kernel_size=1)
+        self.final = nn.Conv3d(16, 1, kernel_size=1) # Create a final convolutional layer to output the segmentation mask.
 
-    def forward(self, x):
+    def forward(self, x): # This method defines the forward pass of the VNet.
         x = self.encoder(x)
         x = self.decoder(x)
         x = self.final(x)
-        return x
+        return x # Returns the output tensor, which is the predicted segmentation mask
 
 
 def load_and_batch_data(image_dir, label_dir, batch_size):
@@ -158,15 +158,15 @@ def load_and_batch_data(image_dir, label_dir, batch_size):
         label_path = os.path.join(label_dir, label_file)
 
         subject = tio.Subject(
-            image=tio.ScalarImage(image_path),
-            label=tio.LabelMap(label_path)
+            image=tio.ScalarImage(image_path), # For each pair of image and label files, create a tio.Subject object using tio.ScalarImage
+            label=tio.LabelMap(label_path) # for the image and tio.LabelMap for the label.
         )
         subjects.append(subject)
 
     # Create a TorchIO Dataset
     dataset = tio.SubjectsDataset(subjects)
 
-    # Create a TorchIO DataLoader
+    # Create a TorchIO DataLoader apply random transformations to the data during training.
     transforms = tio.Compose([
         tio.RandomAffine(),
         tio.RandomNoise(),
@@ -202,41 +202,41 @@ def train_vnet(dataloader, num_epochs, learning_rate, device):
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 
     for epoch in range(num_epochs):
-        model.train()
-        running_loss = 0.0
+        model.train() # Set the model to training mode
+        running_loss = 0.0 # Initialize running loss and epoch Dice coefficient.
         epoch_dice = 0.0
 
         for step, batch_data in enumerate(dataloader):
-            images = batch_data['image'][tio.DATA].to(device)
+            images = batch_data['image'][tio.DATA].to(device) # Load the image and label data for the current batch and move them to the device.
             labels = batch_data['label'][tio.DATA].to(device)
 
-            optimizer.zero_grad()
-            outputs = model(images)
+            optimizer.zero_grad() # Zero the gradients of the optimizer.
+            outputs = model(images) # Feed the image data to the model to get the predicted segmentation mask.
             
             # Compute loss
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
+            loss = criterion(outputs, labels) # Calculate the loss between the predicted mask and the ground truth labels.
+            loss.backward() # Backpropagate the loss to update the model parameters.
+            optimizer.step() # 
 
-            # Apply sigmoid to logits and threshold at 0.5
+            # Apply sigmoid to the logits and threshold at 0.5 to get the final predicted mask.
             outputs = torch.sigmoid(outputs)
             predicted = (outputs > 0.5).float()
 
             # Accumulate loss
-            running_loss += loss.item()
+            running_loss += loss.item() # Accumulate the loss for the epoch
 
             # Compute Dice coefficient for the batch
-            batch_dice = dice_coefficient(labels, predicted)
+            batch_dice = dice_coefficient(labels, predicted) # Calculate the Dice coefficient for the current batch and accumulate it for the epoch.
             epoch_dice += batch_dice
 
-            print(f"Step {step+1}/{len(dataloader)}, Loss: {loss.item():.4f}, Dice: {batch_dice:.4f}")
+            print(f"Step {step+1}/{len(dataloader)}, Loss: {loss.item():.4f}, Dice: {batch_dice:.4f}") # Print the step number, loss, and Dice coefficient
 
         # Learning rate scheduler step
         scheduler.step()
 
-        # Average metrics for the epoch
-        avg_loss = running_loss / len(dataloader)
-        avg_dice = epoch_dice / len(dataloader)
+        # Calculate the average loss and Dice coefficient for the epoch.
+        avg_loss = running_loss / len(dataloader) # total accumulated loss (running_loss) by the number of batches processed in the dataloader (len(dataloader))
+        avg_dice = epoch_dice / len(dataloader) # total accumulated Dice coefficient (epoch_dice) by the number of batches
 
         print(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_loss:.4f}, Average Dice: {avg_dice:.4f}")
 
@@ -260,10 +260,10 @@ def dice_coefficient(y_true, y_pred):
         float: Dice coefficient score.
     """
     smooth = 1e-6
-    y_true_f = y_true.view(-1)
-    y_pred_f = y_pred.view(-1)
-    intersection = (y_true_f * y_pred_f).sum()
-    return (2. * intersection + smooth) / (y_true_f.sum() + y_pred_f.sum() + smooth)
+    y_true_f = y_true.view(-1) # Flatten the tensors.
+    y_pred_f = y_pred.view(-1) # Flatten the tensors.
+    intersection = (y_true_f * y_pred_f).sum() # Calculate the intersection between the true and predicted labels.
+    return (2. * intersection + smooth) / (y_true_f.sum() + y_pred_f.sum() + smooth) # Return the Calculate the Dice coefficient using the intersection and the sums of the true and predicted labels.
 
 
 if __name__ == "__main__":
