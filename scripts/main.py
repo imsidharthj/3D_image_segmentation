@@ -7,6 +7,9 @@ import numpy as np
 from torch.utils.data import DataLoader
 import SimpleITK as sitk
 import numpy as np
+import random
+import matplotlib.pyplot as plt
+import nibabel as nib
 
 
 def resample_nifti(input_dir, output_dir, output_size=(512, 512, 129)):
@@ -57,6 +60,46 @@ label_output_dir = '/home/sidharth/Workspace/python/3D_image_segmentation/data/p
 
 resample_nifti(image_input_dir, image_output_dir)
 resample_nifti(label_input_dir, label_output_dir)
+
+
+def visualize_random_image_and_label(image_dir, label_dir):
+    # List all images and labels in the directory
+    image_files = [f for f in os.listdir(image_dir) if f.endswith('.nii.gz')]
+    label_files = [f for f in os.listdir(label_dir) if f.endswith('.nii.gz')]
+
+    # Select a random image and its corresponding label
+    random_index = random.randint(0, len(image_files) - 1)
+    random_image_file = image_files[random_index]
+    random_label_file = label_files[random_index]
+
+    # Load the random image and label using nibabel
+    random_image_path = os.path.join(image_dir, random_image_file)
+    random_label_path = os.path.join(label_dir, random_label_file)
+    image_data = nib.load(random_image_path).get_fdata()
+    label_data = nib.load(random_label_path).get_fdata()
+
+    # Print the shape of the image and label to verify their dimensions
+    print(f"Random Image Shape: {image_data.shape}")
+    print(f"Random Label Shape: {label_data.shape}")
+
+    # Visualize the middle slice of the 3D image and label along the z-axis
+    middle_slice_idx = image_data.shape[2] // 2
+
+    # Display the image slice
+    plt.figure(figsize=(12, 6))
+    
+    plt.subplot(1, 2, 1)
+    plt.title(f"Random Image - {random_image_file}")
+    plt.imshow(image_data[:, :, middle_slice_idx], cmap='gray')
+    
+    # Display the label slice
+    plt.subplot(1, 2, 2)
+    plt.title(f"Random Label - {random_label_file}")
+    plt.imshow(label_data[:, :, middle_slice_idx], cmap='gray')
+
+    plt.show()
+
+visualize_random_image_and_label(image_output_dir, label_output_dir)
 
 
 class VNet(nn.Module):
