@@ -1,19 +1,28 @@
 import numpy as np
 import os
+import nibabel as nib
+import SimpleITK as sitk
+import matplotlib.pyplot as plt
 import tensorflow as tf
-from tensorflow.keras.layers import Conv3D, MaxPooling3D, UpSampling3D, Dropout, Concatenate
+from tensorflow.keras import layers
+from tensorflow.keras.layers import Conv3D, MaxPooling3D, UpSampling3D, Dropout, Concatenate, Input, Conv3DTranspose, BatchNormalization
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import LearningRateScheduler, ModelCheckpoint
-from tensorflow.keras.utils import to_categorical
-from sklearn.model_selection import train_test_split
 from tensorflow.keras.losses import BinaryCrossentropy
-from tensorflow.keras.metrics import BinaryAccuracy, MeanIoU
-import SimpleITK as sitk
-import nibabel as nib
-import matplotlib.pyplot as plt
 
-# Resampling function for NIfTI images
+
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    for gpu in gpus:
+        try:
+            tf.config.experimental.set_memory_growth(gpu, True)
+            print(f"Memory growth set for GPU: {gpu}")
+        except RuntimeError as e:
+            print(f"Error setting memory growth: {e}")
+else:
+    print("Runnig on CPU")
+
+
 def resample_nifti(input_dir, output_dir, output_size=(512, 512, 129)):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -47,83 +56,206 @@ def resample_nifti(input_dir, output_dir, output_size=(512, 512, 129)):
             print(f"Resampled {file} to size {output_size} and saved to {output_file}")
 
 
-# Load and preprocess data
-def load_and_preprocess_data(image_dir, label_dir, batch_size):
-    image_files = [f for f in os.listdir(image_dir) if f.endswith('.nii.gz')]
-    label_files = [f for f in os.listdir(label_dir) if f.endswith('.nii.gz')]
+def data_load(image_dir, label_dir, batch_size):
+    image_files = tf.io.gfile.glob(image_dir + '/*.nii.gz')
+    label_files = tf.io.gfile.glob(label_dir + '/*.nii.gz')
     assert len(image_files) == len(label_files), "Image and label counts do not match"
 
-    images = []
-    labels = []
+    dataset = tf.data.Dataset.from_tensor_slices((image_files, label_files))
 
-    for image_file, label_file in zip(image_files, label_files):
-        image_path = os.path.join(image_dir, image_file)
-        label_path = os.path.join(label_dir, label_file)
+    def load_and_preprocess(image_file, label_file):
+        image_nifti = nib.load(image_file)
+        image = image_nifti.get_fdata()
+        image = tf.convert_to_tensor(image, tf.float32)
+        image = (image - tf.reduce_mean(image)) / tf.math.reduce_std(image)
+        image = tf.expand_dims(image, axis=-1)  # Add channel dimension
+        
+        label_nifti = nib.load(label_file)
+        label = label_nifti.get_fdata()
+        label = tf.convert_to_tensor(label, dtype=tf.int32)
+        label = tf.one_hot(label, depth=2)
+        return image, label
+    def tf_load_and_preprocess(image_file, label_file):
+        image, label = tf.numpy_function(load_and_preprocess, [image_file, label_file], [tf.float32, tf.float32])
+        return image, label
 
-        image = nib.load(image_path).get_fdata()
-        label = nib.load(label_path).get_fdata()
+    dataset = dataset.map(tf_load_and_preprocess)
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
-        # Normalize image and ensure shape is consistent
-        image = (image - np.mean(image)) / np.std(image)
-        image = np.expand_dims(image, axis=-1)  # Add channel dimension for grayscale
-
-        # One-hot encode label and ensure shape
-        label = to_categorical(label, num_classes=2)
-
-        images.append(image)
-        labels.append(label)
-
-        # Create batches
-        if len(images) == batch_size:
-            yield np.array(images), np.array(labels)
-            images = []
-            labels = []
-
-    # Yield the remaining data if not empty
-    if len(images) > 0:
-        yield np.array(images), np.array(labels)
+    return dataset
 
 
-# Convolution block for V-Net model
-def convolution_block(x, num_filters, kernel_size, activation):
-    x = Conv3D(num_filters, kernel_size, padding='same')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Activation(activation)(x)
+def normalization_layer(inputs, mode='batch_norm'):
+    normalizations = {
+        'batch_norm': layers.BatchNormalization(),
+        # Add more normalization methods here
+    }
+    
+    if mode in normalizations:
+        return normalizations[mode](inputs)
+    else:
+        raise ValueError(f"Unsupported normalization: {mode}")
+
+
+def activation_layer(inputs, activation):
+    """Applies the specified activation function to inputs."""
+    activations = {
+        'relu': layers.ReLU(),          # ReLU doesn't require additional arguments
+        'sigmoid': layers.Activation('sigmoid'),  # Directly pass the activation function
+    }
+    # Apply the activation function to the inputs
+    return activations[activation](inputs)
+
+
+
+def convolution_layer(inputs, filters, kernel_size, normalization, activation):
+    """
+    Convolutional layer with optional normalization, activation, and dropout.
+
+    Args:
+        inputs (tensor): Input tensor.
+        filters (int): Number of filters.
+        kernel_size (tuple): Kernel size.
+        normalization (bool): Whether to apply normalization.
+        activation (str): Activation function.
+        dropout_rate (float, optional): Dropout rate. Defaults to 0.0.
+
+    Returns:
+        tensor: Output tensor.
+    """
+    x = layers.Conv3D(
+        filters=filters,
+        kernel_size=kernel_size,
+        strides=(1, 1, 1),
+        padding='same',
+        kernel_initializer='glorot_uniform',
+        bias_initializer='zeros'
+    )(inputs)
+    
+    x = normalization_layer(x, normalization)
+    x = activation_layer(x, activation)
+    
     return x
 
-# V-Net architecture definition
-def build_vnet(input_shape, num_classes):
-    inputs = tf.keras.layers.Input(shape=input_shape)
-    c1 = convolution_block(inputs, 16, (3, 3, 3), 'relu')
-    p1 = Conv3D(32, (2, 2, 2), strides=(2, 2, 2), padding='same')(c1)
-    c2 = convolution_block(p1, 32, (3, 3, 3), 'relu')
-    p2 = Conv3D(64, (2, 2, 2), strides=(2, 2, 2), padding='same')(c2)
-    c3 = convolution_block(p2, 64, (3, 3, 3), 'relu')
-    p3 = Conv3D(128, (2, 2, 2), strides=(2, 2, 2), padding='same')(c3)
-    c4 = convolution_block(p3, 128, (3, 3, 3), 'relu')
-    u5 = UpSampling3D(size=(2, 2, 2))(c4)
-    u5 = Concatenate()([u5, c3])
-    c5 = convolution_block(u5, 64, (3, 3, 3), 'relu')
-    u6 = UpSampling3D(size=(2, 2, 2))(c5)
-    u6 = Concatenate()([u6, c2])
-    c6 = convolution_block(u6, 32, (3, 3, 3), 'relu')
-    u7 = UpSampling3D(size=(2, 2, 2))(c6)
-    u7 = Concatenate()([u7, c1])
-    c7 = convolution_block(u7, 16, (3, 3, 3), 'relu')
-    outputs = Conv3D(num_classes, (1, 1, 1), activation='softmax')(c7)
+
+def upsample_layer(inputs, filters, upsampling, activation, mode):
+    if upsampling == 'transposed_conv':
+        x = tf.keras.layers.Conv3DTranspose(filters=filters, kernel_size=2, strides=2, padding='same', kernel_initializer='glorot_uniform', bias_initializer='zeros')(inputs)
+        if mode == 'train':
+            x = tf.keras.layers.BatchNormalization()(x)
+
+        x = activation_layer(x, activation)
+
+        return x
+
+    else:
+        raise ValueError('Unsupported upsampling: {}'.format(upsampling))
+    
+
+def concatenate_u_to_c(u, c, kernel_size, depth, normalization, activation, mode):
+    """
+    Concatenates the upsampling layer (u) to the contracting layer (c) 
+    and applies residual block processing, ensuring spatial shapes match.
+
+    Args:
+        u (tensor): Upsampling layer output.
+        c (tensor): Contracting layer output.
+        kernel_size (int): Kernel size for convolutional layers.
+        depth (int): Number of convolutional layers in the residual block.
+        normalization (str): Normalization method.
+        activation (str): Activation function.
+        mode (tf.estimator.ModeKeys): Training mode.
+
+    Returns:
+        tensor: Output of the concatenated and processed layers.
+    """
+    with tf.name_scope('concatenate_u_to_c'):
+        # Ensure shapes match by cropping the larger tensor
+        u_shape = tf.shape(u)
+        c_shape = tf.shape(c)
+
+        # Find the minimum depth (3rd dimension)
+        min_depth = tf.minimum(u_shape[3], c_shape[3])
+
+        # Crop the larger tensor to match the smaller tensor
+        if u_shape[3] > min_depth:
+            u = u[:, :, :, :min_depth, :]
+        elif c_shape[3] > min_depth:
+            c = c[:, :, :, :min_depth, :]
+
+        # Concatenate the u and c layers along the last axis (channel dimension)
+        x = tf.concat([u, c], axis=-1)
+
+        # Apply residual block processing
+        n_input_channels = x.get_shape()[-1]
+        for i in range(depth):
+            x = convolution_layer(inputs=x,
+                                  filters=n_input_channels,
+                                  kernel_size=kernel_size,
+                                  stride=1,
+                                  normalization=normalization,
+                                  activation=activation,
+                                  mode=mode)
+
+        return x + tf.identity(x)  # Residual connection
+
+
+
+def build_vnet(input_shape, num_classes, dropout_rate=0.2):
+    inputs = tf.keras.layers.Input(shape=input_shape) # architectural decision, layer for shape of 3D image
+
+    c1 = convolution_layer(inputs, 16, (3, 3, 3), 'batch_norm', 'relu')
+    c1 = layers.Dropout(dropout_rate)(c1)
+    p1 = layers.Conv3D(32, (2, 2, 2), strides=(2, 2, 2), padding='same')(c1)
+    
+    c2 = convolution_layer(p1, 32, (3, 3, 3), 'batch_norm', 'relu')
+    c2 = layers.Dropout(dropout_rate)(c2)
+    p2 = layers.Conv3D(64, (2, 2, 2), strides=(2, 2, 2), padding='same')(c2)
+    
+    c3 = convolution_layer(p2, 64, (3, 3, 3), 'batch_norm', 'relu')
+    c3 = layers.Dropout(dropout_rate)(c3)
+    p3 = layers.Conv3D(128, (2, 2, 2), strides=(2, 2, 2), padding='same')(c3)
+    
+    c4 = convolution_layer(p3, 128, (3, 3, 3), 'batch_norm', 'relu')
+    
+    u5 = upsample_layer(c4, 64, 'transposed_conv', 'relu', mode='train')
+    u5 = concatenate_u_to_c(u5, c3, kernel_size=3, depth=2, normalization='batch_norm', activation='relu', mode='train')
+    print(f"u5 shape: {u5.shape}")
+    u5 = convolution_layer(u5, 64, (3, 3, 3), 'batch_norm', 'relu')
+    u5 = layers.Dropout(dropout_rate)(u5)
+    
+    u6 = upsample_layer(u5, 32, 'transposed_conv', 'relu', mode='train')
+    u6 = concatenate_u_to_c(u6, c2, kernel_size=3, depth=2, normalization='batch_norm', activation='relu', mode='train')
+    print(f"u6 shape: {u6.shape}")
+    u6 = convolution_layer(u6, 32, (3, 3, 3), 'batch_norm', 'relu')
+    u6 = layers.Dropout(dropout_rate)(u6)
+    
+    u7 = upsample_layer(u6, 16, 'transposed_conv', 'relu', mode='train')
+    u7 = concatenate_u_to_c(u7, c1, kernel_size=3, depth=2, normalization='batch_norm', activation='relu', mode='train')
+    print(f"u7 shape: {u7.shape}")
+    u7 = convolution_layer(u7, 16, (3, 3, 3), 'batch_norm', 'relu')
+    u7 = layers.Dropout(dropout_rate)(u7)
+    
+    outputs = Conv3D(num_classes, (1, 1, 1), activation='softmax')(u7) # This layer outputs the final predictions. The number of filters is equal to num_classes, and a (1, 1, 1) kernel size means it applies a pointwise convolution.
+    
     model = Model(inputs=[inputs], outputs=[outputs])
+    
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='categorical_crossentropy', metrics=['accuracy', dice_coefficient])
     return model
 
-# Dice coefficient
-def dice_coefficient(y_pred, y_true):
-    intersection = tf.reduce_sum(y_pred * y_true)
-    union = tf.reduce_sum(y_pred) + tf.reduce_sum(y_true)
-    dice = (2.0 * intersection + 1e-5) / (union + 1e-5)
-    return tf.reduce_mean(dice)
 
-# Training loop for V-Net
+def dice_coefficient(y_pred, y_true):
+    # intersection = tf.reduce_sum(y_pred * y_true)
+    # union = tf.reduce_sum(y_pred) + tf.reduce_sum(y_true)
+    # dice = (2.0 * intersection + 1e-5) / (union + 1e-5)
+    dice_coefficient = tf.keras.metrics.MeanIoU(num_classes=2)
+    dice = dice_coefficient(y_pred, y_true)
+    return dice
+
+
 def train_vnet(dataloader, num_epochs, learning_rate):
-    input_shape = (512, 512, 129, 1)  # Adjust input shape if needed
+    input_shape = (512, 512, 129, 1)
     num_classes = 2
     model = build_vnet(input_shape, num_classes)
     model.compile(optimizer=Adam(learning_rate=learning_rate),
@@ -157,22 +289,18 @@ def train_vnet(dataloader, num_epochs, learning_rate):
     print("Training complete. Model saved as model_vnet_final.h5.")
 
 
-# Main paths and setup
+base_dir = os.path.dirname(os.path.abspath(__file__))
 image_input_dir = '/home/sidharth/Workspace/python/3D_image_segmentation/data/raw/images'
 label_input_dir = '/home/sidharth/Workspace/python/3D_image_segmentation/data/raw/labels'
 image_output_dir = '/home/sidharth/Workspace/python/3D_image_segmentation/data/processed/images'
 label_output_dir = '/home/sidharth/Workspace/python/3D_image_segmentation/data/processed/labels'
 
-# Resample images
+
 resample_nifti(image_input_dir, image_output_dir)
 resample_nifti(label_input_dir, label_output_dir)
-
-# Load and batch data
 batch_size = 4
-train_dataset = load_and_preprocess_data(image_output_dir, label_output_dir, batch_size)
-
-# Train model
-train_vnet(train_dataset, num_epochs=10, learning_rate=1e-4)
+dataset = data_load(image_output_dir, label_output_dir, batch_size)
+train_vnet(dataset, num_epochs=10, learning_rate=0.001)
 
 
 def test(model_path, test_image_path, input_shape, num_classes):
@@ -224,50 +352,9 @@ def test(model_path, test_image_path, input_shape, num_classes):
     plt.show()
 
 input_shape = (512, 512, 129, 1)
-num_classes = 2  # Binary segmentation
+num_classes = 2
 model_path = 'saved_models/model_vnet_final.h5'
 test_image_path = '/home/sidharth/Workspace/python/3D_image_segmentation/data/test/images/FLARE22_Tr_0047_0000.nii.gz'
 
 test(model_path, test_image_path, input_shape, num_classes)
 
-
-# import matplotlib.pyplot as plt
-
-# # Visualize original test image and predicted segmentation mask
-# def visualize_segmentation(test_image, predicted_mask, slice_num):
-#     plt.figure(figsize=(12, 6))
-
-#     # Original image slice
-#     plt.subplot(1, 2, 1)
-#     plt.imshow(test_image[0, :, :, slice_num, 0], cmap='gray')
-#     plt.title(f'Original Image - Slice {slice_num}')
-
-#     # Predicted segmentation mask slice
-#     plt.subplot(1, 2, 2)
-#     plt.imshow(predicted_mask[0, :, :, slice_num], cmap='gray')
-#     plt.title(f'Predicted Segmentation - Slice {slice_num}')
-    
-#     plt.show()
-
-# # Example of visualizing slice 60
-# visualize_segmentation(test_image, predicted_mask, slice_num=60)
-
-
-# def dice_coefficient(y_true, y_pred):
-#     y_true_f = np.ravel(y_true)
-#     y_pred_f = np.ravel(y_pred)
-#     intersection = np.sum(y_true_f * y_pred_f)
-#     dice = (2. * intersection) / (np.sum(y_true_f) + np.sum(y_pred_f))
-#     return dice
-
-# # Example evaluation on a test image
-# test_label_path = '/path/to/test/label.nii.gz'
-# test_label = nib.load(test_label_path).get_fdata()
-
-# # Ensure shapes match for comparison
-# predicted_mask_resized = predicted_mask[0]  # Removing batch dimension
-# test_label_resized = test_label[:predicted_mask_resized.shape[0], :predicted_mask_resized.shape[1], :predicted_mask_resized.shape[2]]
-
-# # Evaluate dice score
-# dice_score = dice_coefficient(test_label_resized, predicted_mask_resized)
-# print(f"Dice Coefficient: {dice_score:.4f}")
