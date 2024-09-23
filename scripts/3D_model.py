@@ -5,7 +5,7 @@ import SimpleITK as sitk
 import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.keras import layers
-from tensorflow.keras.layers import Conv3D, MaxPooling3D, UpSampling3D, Dropout, Concatenate, Input, Conv3DTranspose, BatchNormalization
+from tensorflow.keras.layers import Conv3D, MaxPooling3D, UpSampling3D, Dropout, Concatenate, Input, Conv3DTranspose, BatchNormalization, Lambda
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import BinaryCrossentropy
@@ -23,7 +23,7 @@ else:
     print("Runnig on CPU")
 
 
-def resample_nifti(input_dir, output_dir, output_size=(512, 512, 129)):
+def resample_nifti(input_dir, output_dir, output_size=(512, 512, 128)):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -86,110 +86,69 @@ def data_load(image_dir, label_dir, batch_size):
     return dataset
 
 
-def normalization_layer(inputs, mode='batch_norm'):
-    normalizations = {
-        'batch_norm': layers.BatchNormalization(),
-        # Add more normalization methods here
-    }
-    
-    if mode in normalizations:
-        return normalizations[mode](inputs)
+def normalization_layer(inputs, name='batch_norm', mode='train'):
+    if name == 'batch_norm':
+        return layers.BatchNormalization()(inputs) if mode == 'train' else layers.BatchNormalization(trainable=False)(inputs)
+    elif name == 'none':
+        return inputs
     else:
-        raise ValueError(f"Unsupported normalization: {mode}")
+        raise ValueError(f"Invalid normalization layer: {name}")
 
 
-def activation_layer(inputs, activation):
-    """Applies the specified activation function to inputs."""
-    activations = {
-        'relu': layers.ReLU(),          # ReLU doesn't require additional arguments
-        'sigmoid': layers.Activation('sigmoid'),  # Directly pass the activation function
-    }
-    # Apply the activation function to the inputs
-    return activations[activation](inputs)
+def activation_layer(inputs, activation='relu'):
+    if activation == 'relu':
+        return tf.nn.relu(inputs)
+    elif activation == 'sigmoid':
+        return tf.nn.sigmoid(inputs)
+    elif activation == 'none':
+        return inputs
+    else:
+        raise ValueError(f"Unknown activation: {activation}")
 
 
-
-def convolution_layer(inputs, filters, kernel_size, normalization, activation):
-    """
-    Convolutional layer with optional normalization, activation, and dropout.
-
-    Args:
-        inputs (tensor): Input tensor.
-        filters (int): Number of filters.
-        kernel_size (tuple): Kernel size.
-        normalization (bool): Whether to apply normalization.
-        activation (str): Activation function.
-        dropout_rate (float, optional): Dropout rate. Defaults to 0.0.
-
-    Returns:
-        tensor: Output tensor.
-    """
-    x = layers.Conv3D(
-        filters=filters,
-        kernel_size=kernel_size,
-        strides=(1, 1, 1),
-        padding='same',
-        kernel_initializer='glorot_uniform',
-        bias_initializer='zeros'
-    )(inputs)
+def convolution_layer(inputs, filters, kernel_size, stride=1, normalization='batch_norm', activation='relu', mode='train'):
+    x = layers.Conv3D(filters=filters,
+                      kernel_size=kernel_size,
+                      strides=stride,
+                      activation=None,
+                      padding='same',
+                      kernel_initializer=tf.keras.initializers.GlorotUniform())(inputs)
     
-    x = normalization_layer(x, normalization)
-    x = activation_layer(x, activation)
-    
-    return x
+    x = normalization_layer(x, normalization, mode)
+    return activation_layer(x, activation)
 
 
-def upsample_layer(inputs, filters, upsampling, activation, mode):
+def upsample_layer(inputs, filters, upsampling, normalization, activation, mode):
     if upsampling == 'transposed_conv':
-        x = tf.keras.layers.Conv3DTranspose(filters=filters, kernel_size=2, strides=2, padding='same', kernel_initializer='glorot_uniform', bias_initializer='zeros')(inputs)
-        if mode == 'train':
-            x = tf.keras.layers.BatchNormalization()(x)
-
-        x = activation_layer(x, activation)
-
-        return x
-
+        x = layers.Conv3DTranspose(filters=filters,
+                                   kernel_size=2,
+                                   strides=2,
+                                   activation=None,
+                                   padding='same',
+                                   kernel_initializer=tf.keras.initializers.GlorotUniform())(inputs)
+        
+        x = normalization_layer(x, normalization, mode)
+        return activation_layer(x, activation)
     else:
         raise ValueError('Unsupported upsampling: {}'.format(upsampling))
-    
 
-def concatenate_u_to_c(u, c, kernel_size, depth, normalization, activation, mode):
-    """
-    Concatenates the upsampling layer (u) to the contracting layer (c) 
-    and applies residual block processing, ensuring spatial shapes match.
 
-    Args:
-        u (tensor): Upsampling layer output.
-        c (tensor): Contracting layer output.
-        kernel_size (int): Kernel size for convolutional layers.
-        depth (int): Number of convolutional layers in the residual block.
-        normalization (str): Normalization method.
-        activation (str): Activation function.
-        mode (tf.estimator.ModeKeys): Training mode.
-
-    Returns:
-        tensor: Output of the concatenated and processed layers.
-    """
-    with tf.name_scope('concatenate_u_to_c'):
-        # Ensure shapes match by cropping the larger tensor
+def concatenate_u_to_c(u, c, kernel_size=3, depth=2, normalization='batch_norm', activation='relu', mode='train'):
+    with tf.name_scope('residual_block'):
         u_shape = tf.shape(u)
         c_shape = tf.shape(c)
+        min_depth = tf.minimum(tf.gather(u_shape, 3), tf.gather(c_shape, 3))
 
-        # Find the minimum depth (3rd dimension)
-        min_depth = tf.minimum(u_shape[3], c_shape[3])
+        # Use tf.slice to dynamically crop the larger tensor
+        u = tf.slice(u, [0, 0, 0, 0, 0], [u_shape[0], u_shape[1], u_shape[2], min_depth, u_shape[4]])
+        c = tf.slice(c, [0, 0, 0, 0, 0], [c_shape[0], c_shape[1], c_shape[2], min_depth, c_shape[4]])
 
-        # Crop the larger tensor to match the smaller tensor
-        if u_shape[3] > min_depth:
-            u = u[:, :, :, :min_depth, :]
-        elif c_shape[3] > min_depth:
-            c = c[:, :, :, :min_depth, :]
-
-        # Concatenate the u and c layers along the last axis (channel dimension)
         x = tf.concat([u, c], axis=-1)
 
-        # Apply residual block processing
-        n_input_channels = x.get_shape()[-1]
-        for i in range(depth):
+        inputs = x
+        n_input_channels = inputs.get_shape()[-1]
+
+        for _ in range(depth):
             x = convolution_layer(inputs=x,
                                   filters=n_input_channels,
                                   kernel_size=kernel_size,
@@ -197,49 +156,47 @@ def concatenate_u_to_c(u, c, kernel_size, depth, normalization, activation, mode
                                   normalization=normalization,
                                   activation=activation,
                                   mode=mode)
-
-        return x + tf.identity(x)  # Residual connection
-
+        return x + inputs
 
 
 def build_vnet(input_shape, num_classes, dropout_rate=0.2):
     inputs = tf.keras.layers.Input(shape=input_shape) # architectural decision, layer for shape of 3D image
 
-    c1 = convolution_layer(inputs, 16, (3, 3, 3), 'batch_norm', 'relu')
+    c1 = convolution_layer(inputs, 16, (3, 3, 3), stride=1, normalization='batch_norm', activation='relu', mode='train')
     c1 = layers.Dropout(dropout_rate)(c1)
     p1 = layers.Conv3D(32, (2, 2, 2), strides=(2, 2, 2), padding='same')(c1)
     
-    c2 = convolution_layer(p1, 32, (3, 3, 3), 'batch_norm', 'relu')
+    c2 = convolution_layer(p1, 32, (3, 3, 3), stride=1, normalization='batch_norm', activation='relu', mode='train')
     c2 = layers.Dropout(dropout_rate)(c2)
     p2 = layers.Conv3D(64, (2, 2, 2), strides=(2, 2, 2), padding='same')(c2)
     
-    c3 = convolution_layer(p2, 64, (3, 3, 3), 'batch_norm', 'relu')
+    c3 = convolution_layer(p2, 64, (3, 3, 3), stride=1, normalization='batch_norm', activation='relu', mode='train')
     c3 = layers.Dropout(dropout_rate)(c3)
     p3 = layers.Conv3D(128, (2, 2, 2), strides=(2, 2, 2), padding='same')(c3)
     
-    c4 = convolution_layer(p3, 128, (3, 3, 3), 'batch_norm', 'relu')
+    c4 = convolution_layer(p3, 128, (3, 3, 3), stride=1, normalization='batch_norm', activation='relu', mode='train')
     
-    u5 = upsample_layer(c4, 64, 'transposed_conv', 'relu', mode='train')
+    u5 = upsample_layer(c4, 64, 'transposed_conv', normalization='batch_norm', activation='relu', mode='train')
     u5 = concatenate_u_to_c(u5, c3, kernel_size=3, depth=2, normalization='batch_norm', activation='relu', mode='train')
     print(f"u5 shape: {u5.shape}")
-    u5 = convolution_layer(u5, 64, (3, 3, 3), 'batch_norm', 'relu')
+    # u5 = convolution_layer(u5, 64, (3, 3, 3), 'batch_norm', 'relu')
     u5 = layers.Dropout(dropout_rate)(u5)
     
-    u6 = upsample_layer(u5, 32, 'transposed_conv', 'relu', mode='train')
+    u6 = upsample_layer(u5, 32, 'transposed_conv', normalization='batch_norm', activation='relu', mode='train')
     u6 = concatenate_u_to_c(u6, c2, kernel_size=3, depth=2, normalization='batch_norm', activation='relu', mode='train')
     print(f"u6 shape: {u6.shape}")
-    u6 = convolution_layer(u6, 32, (3, 3, 3), 'batch_norm', 'relu')
+    # u6 = convolution_layer(u6, 32, (3, 3, 3), 'batch_norm', 'relu')
     u6 = layers.Dropout(dropout_rate)(u6)
     
-    u7 = upsample_layer(u6, 16, 'transposed_conv', 'relu', mode='train')
+    u7 = upsample_layer(u6, 16, 'transposed_conv', normalization='batch_norm', activation='relu', mode='train')
     u7 = concatenate_u_to_c(u7, c1, kernel_size=3, depth=2, normalization='batch_norm', activation='relu', mode='train')
     print(f"u7 shape: {u7.shape}")
-    u7 = convolution_layer(u7, 16, (3, 3, 3), 'batch_norm', 'relu')
+    # u7 = convolution_layer(u7, 16, (3, 3, 3), 'batch_norm', 'relu')
     u7 = layers.Dropout(dropout_rate)(u7)
     
     outputs = Conv3D(num_classes, (1, 1, 1), activation='softmax')(u7) # This layer outputs the final predictions. The number of filters is equal to num_classes, and a (1, 1, 1) kernel size means it applies a pointwise convolution.
     
-    model = Model(inputs=[inputs], outputs=[outputs])
+    model = tf.keras.models.Model(inputs=inputs, outputs=outputs)
     
     model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='categorical_crossentropy', metrics=['accuracy', dice_coefficient])
     return model
@@ -249,13 +206,17 @@ def dice_coefficient(y_pred, y_true):
     # intersection = tf.reduce_sum(y_pred * y_true)
     # union = tf.reduce_sum(y_pred) + tf.reduce_sum(y_true)
     # dice = (2.0 * intersection + 1e-5) / (union + 1e-5)
-    dice_coefficient = tf.keras.metrics.MeanIoU(num_classes=2)
-    dice = dice_coefficient(y_pred, y_true)
-    return dice
+    # dice_coefficient = tf.keras.metrics.MeanIoU(num_classes=2)
+    # dice = dice_coefficient(y_pred, y_true)
+    # return dice
+    y_true_f = tf.keras.backend.flatten(y_true)
+    y_pred_f = tf.keras.backend.flatten(y_pred)
+    intersection = tf.reduce_sum(y_true_f * y_pred_f)
+    return (2.0 * intersection + 1e-5) / (tf.reduce_sum(y_true_f) + tf.reduce_sum(y_pred_f) + 1e-5)
 
 
 def train_vnet(dataloader, num_epochs, learning_rate):
-    input_shape = (512, 512, 129, 1)
+    input_shape = (512, 512, 128, 1)
     num_classes = 2
     model = build_vnet(input_shape, num_classes)
     model.compile(optimizer=Adam(learning_rate=learning_rate),
@@ -277,8 +238,12 @@ def train_vnet(dataloader, num_epochs, learning_rate):
             steps += 1
             print(f"Step {steps}, Loss: {loss:.4f}, Dice: {dice:.4f}")
 
-        avg_loss = epoch_loss / steps
-        avg_dice = epoch_dice / steps
+        if steps > 0:
+            avg_loss = epoch_loss / steps
+            avg_dice = epoch_dice / steps
+        else:
+            avg_loss = 0
+            avg_dice = 0
         print(f"Epoch {epoch+1}/{num_epochs}, Avg Loss: {avg_loss:.4f}, Avg Dice: {avg_dice:.4f}")
         
         # Save model after each epoch
@@ -357,4 +322,3 @@ model_path = 'saved_models/model_vnet_final.h5'
 test_image_path = '/home/sidharth/Workspace/python/3D_image_segmentation/data/test/images/FLARE22_Tr_0047_0000.nii.gz'
 
 test(model_path, test_image_path, input_shape, num_classes)
-
