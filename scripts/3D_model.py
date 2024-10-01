@@ -316,7 +316,7 @@ def test(model_path, test_image_path, input_shape, num_classes):
 
     plt.show()
 
-input_shape = (512, 512, 129, 1)
+input_shape = (512, 512, 128, 1)
 num_classes = 2
 model_path = 'saved_models/model_vnet_final.h5'
 test_image_path = '/home/sidharth/Workspace/python/3D_image_segmentation/data/test/images/FLARE22_Tr_0047_0000.nii.gz'
