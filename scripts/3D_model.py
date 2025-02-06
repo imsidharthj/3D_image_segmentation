@@ -64,6 +64,12 @@ def data_load(image_dir, label_dir, batch_size):
     dataset = tf.data.Dataset.from_tensor_slices((image_files, label_files))
 
     def load_and_preprocess(image_file, label_file):
+        # Decode bytes to string if necessary
+        if isinstance(image_file, bytes):
+            image_file = image_file.decode('utf-8')
+        if isinstance(label_file, bytes):
+            label_file = label_file.decode('utf-8')
+
         image_nifti = nib.load(image_file)
         image = image_nifti.get_fdata()
         image = tf.convert_to_tensor(image, tf.float32)
@@ -75,6 +81,7 @@ def data_load(image_dir, label_dir, batch_size):
         label = tf.convert_to_tensor(label, dtype=tf.int32)
         label = tf.one_hot(label, depth=2)
         return image, label
+
     def tf_load_and_preprocess(image_file, label_file):
         image, label = tf.numpy_function(load_and_preprocess, [image_file, label_file], [tf.float32, tf.float32])
         return image, label
@@ -139,11 +146,19 @@ def concatenate_u_to_c(u, c, kernel_size=3, depth=2, normalization='batch_norm',
         c_shape = tf.shape(c)
         min_depth = tf.minimum(tf.gather(u_shape, 3), tf.gather(c_shape, 3))
 
+        print(f"u shape before slicing: {u_shape}")
+        print(f"c shape before slicing: {c_shape}")
+        print(f"min_depth: {min_depth}")
+
         # Use tf.slice to dynamically crop the larger tensor
         u = tf.slice(u, [0, 0, 0, 0, 0], [u_shape[0], u_shape[1], u_shape[2], min_depth, u_shape[4]])
         c = tf.slice(c, [0, 0, 0, 0, 0], [c_shape[0], c_shape[1], c_shape[2], min_depth, c_shape[4]])
 
+        print(f"u shape after slicing: {tf.shape(u)}")
+        print(f"c shape after slicing: {tf.shape(c)}")
+
         x = tf.concat([u, c], axis=-1)
+        print(f"x shape after concatenation: {tf.shape(x)}")
 
         inputs = x
         n_input_channels = inputs.get_shape()[-1]
@@ -156,6 +171,11 @@ def concatenate_u_to_c(u, c, kernel_size=3, depth=2, normalization='batch_norm',
                                   normalization=normalization,
                                   activation=activation,
                                   mode=mode)
+            print(f"x shape after convolution {_ + 1}: {tf.shape(x)}")
+
+        print(f"Final x shape: {tf.shape(x)}")
+        print(f"Inputs shape: {tf.shape(inputs)}")
+
         return x + inputs
 
 
